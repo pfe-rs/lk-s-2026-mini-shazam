@@ -6,7 +6,6 @@ dataset/
 *.json
 *.zip
 !manifest.json
-!fma_track_files.json
 !selected_tracks.csv
 
 progress/
