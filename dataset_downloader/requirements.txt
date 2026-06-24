@@ -1,0 +1,4 @@
+mutagen==1.47.0
+numpy==2.3.1
+pandas==2.3.0
+yt-dlp==2025.12.8
