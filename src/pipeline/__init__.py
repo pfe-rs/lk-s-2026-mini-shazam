@@ -2,6 +2,7 @@ from .config import RecognitionPipelineConfig
 from .result import RecognitionResult, EvaluationResult
 from .pipeline import RecognitionPipeline
 from .fingerprinter import AbstractFingerprinter, CNNFingerprinter, MathFingerprinter
+from .spectrogram import SpectrogramGenerator
 
 __all__ = [
     "RecognitionPipelineConfig",
@@ -11,4 +12,5 @@ __all__ = [
     "AbstractFingerprinter",
     "CNNFingerprinter",
     "MathFingerprinter",
+    "SpectrogramGenerator"
 ]
