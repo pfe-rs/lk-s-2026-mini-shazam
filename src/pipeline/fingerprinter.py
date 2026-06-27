@@ -17,6 +17,7 @@ class AbstractFingerprinter:
 
 
 class CNNFingerprinter(AbstractFingerprinter):
+    from src.training_CNN import augmenter, dataset, trainer
     def fingerprint(self, spectrogram: np.ndarray) -> np.ndarray:
         raise NotImplementedError("CNNFingerprinter not yet implemented")
 
