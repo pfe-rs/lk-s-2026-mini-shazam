@@ -107,6 +107,11 @@ class TrainingPipeline:
         
         train_model = AudioResNet(embedding_size=128).to(device)
         train_model.model_num = model_num
+
+        train_model.load_params(
+            MODEL_DIR,
+            model_num
+        )
         
         dummy_spectrograms = torch.randn(64, 1, 128, 216).to(device)
             
@@ -137,7 +142,7 @@ class TrainingPipeline:
     def eval_model(self, model_num):
         print(f"Doing evaluation on {len(self.original_filenames)} spectrograms and {len(self.original_labels)} labels.")
         train_model = AudioResNet(embedding_size=128).to(self.device)
-        train_model.model_num = 100
+        train_model.model_num = model_num
         
         train_model.load_params(
             self.MODEL_DIR,
