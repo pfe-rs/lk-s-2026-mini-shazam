@@ -15,14 +15,17 @@ import torch.optim as optim
 from pytorch_metric_learning import losses, miners
 import torch.nn as nn
 
-from src.training.dataset import TripletDataset, PathMaker
-from src.training.modelClass import AudioResNet
+from src.training.dataset import PathMaker
 from src.training.evaluaator import Evaluator
 
+from src.training.dataset import UNetDataset
+from src.training.modelClass import AudioUNet, HashingDenoisingLoss
+from src.training.evaluaator import EvaluatorUNetMath
 
 
-class TrainingPipeline:
-    def __init__(self):
+
+class TrainingPipelineUNet:
+    def __init__(self,batch_size=16):
         paths = Datapaths()
         self.ROOT_DIR=paths.ROOT_DIR
         self.SPECT_DIR=paths.SPECT_DIR
@@ -47,52 +50,52 @@ class TrainingPipeline:
             NOISE_DIR
         )
 
-        train_dataset = TripletDataset(
+        train_dataset = UNetDataset(
             train_filenames,
             train_labels,
             noise_paths=noise_filenames,
             type_of_dataset='train'
         )
-        test_dataset = TripletDataset(
+        test_dataset = UNetDataset(
             test_filenames,
             test_labels,
             noise_paths=noise_filenames,
             type_of_dataset='test'
         )
-        original_dataset = TripletDataset(
+        original_dataset = UNetDataset(
             original_filenames,
             original_labels,
             noise_paths=noise_filenames,
             type_of_dataset='original'
         )
+    
 
         
 
         train_dataloader = DataLoader(
             train_dataset, 
-            batch_size=64,       # Number of audio files to process simultaneously
+            batch_size=batch_size,       # Number of audio files to process simultaneously
             shuffle=True,        # Mixes up the order every epoch so the model learns features, not order
             drop_last=True       # Trims the last batch if it doesn't perfectly divide by 64
         )
         test_dataloader = DataLoader(
             test_dataset, 
-            batch_size=64,       # Number of audio files to process simultaneously
+            batch_size=batch_size,       # Number of audio files to process simultaneously
+            shuffle=False,        # Mixes up the order every epoch so the model learns features, not order
+        )
+        original_dataloader = DataLoader(
+            original_dataset, 
+            batch_size=batch_size,       # Number of audio files to process simultaneously
             shuffle=True,        # Mixes up the order every epoch so the model learns features, not order
         )
         
-        original_dataloader = DataLoader(
-            original_dataset, 
-            batch_size=64,       # Number of audio files to process simultaneously
-            shuffle=True,        # Mixes up the order every epoch so the model learns features, not order
-        )
-
         self.train_dataloader = train_dataloader
         self.test_dataloader = test_dataloader
         self.original_dataloader = original_dataloader
 
         self.original_filenames = original_filenames
         self.original_labels = original_labels
-    def train_cnn(self, train_epochs =0, model_num = 0) -> None:
+    def train_unet(self, train_epochs =0, model_num = 0) -> None:
         original_filenames = self.original_filenames
         original_labels = self.original_labels
         ROOT_DIR=self.ROOT_DIR
@@ -104,56 +107,106 @@ class TrainingPipeline:
         
         train_dataloader = self.train_dataloader
         test_dataloader = self.test_dataloader
-        original_dataloader = self.original_dataloader
 
         
-        train_model = AudioResNet(embedding_size=128).to(device)
+        train_model = AudioUNet().to(device)
         train_model.model_num = model_num
 
-        train_model.load_params(
-            MODEL_DIR,
-            model_num
-        )
+        if model_num>0:
+            train_model.load_params(
+                MODEL_DIR,
+                model_num
+            )
         
-        dummy_spectrograms = torch.randn(64, 1, 128, 216).to(device)
+        dummy_spectrograms = torch.randn(2, 1, 128, 216).to(device)
             
         # Run the fake data through the model
-        output = train_model(dummy_spectrograms)
-        
+        # What you need:
+        denoised_output, mask_output = train_model(dummy_spectrograms)        
         
         print("--- Model Architecture Test ---")
         print(f"Input Spectrogram Shape:  {dummy_spectrograms.shape}")
-        print(f"Output Embedding Shape:   {output.shape}")
-        print("Test Passed: The model successfully output 128 normalized coordinates per audio clip!")
+        print("--- Model Architecture Test ---")
+        print(f"Input Spectrogram Shape:  {dummy_spectrograms.shape}")
+        print(f"Output Spectrogram Shape: {denoised_output.shape}") 
+        print(f"Output Mask Shape:        {mask_output.shape}")
+        print("Test Passed: The model successfully output denoised spectrogram normalized coordinates per audio clip!")
+        print("----------------------------------------")
+        # return
 
-        miner = miners.TripletMarginMiner(margin=1.0, type_of_triplets="hard")
-        loss_func = losses.TripletMarginLoss(margin=1.0)
+        # Initialize the Optimizer
+        # AdamW is the standard for U-Nets (handles weight decay better than standard Adam)
+        optimizer = optim.AdamW(train_model.parameters(), lr=1e-3, weight_decay=1e-4)
         
-        optimizer = optim.Adam(train_model.parameters(), lr=1e-4)
+        # Initialize a Learning Rate Scheduler 
+        # Smoothly drops the learning rate as epochs progress for fine-tuning
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
+        
+        # Initialize our custom loss
+        criterion = HashingDenoisingLoss()
 
         train_model.fit(
             dataloader=train_dataloader,
             optimizer=optimizer,
-            miner=miner,
-            loss_func=loss_func,
+            loss_func=criterion,
+            scheduler = scheduler,
             device=device,
             model_dir=MODEL_DIR,
             num_epochs=train_epochs,  # Ili ručno stavi 20,
             eval_set = (self.test_dataloader, self.original_dataloader)
         )
+    def eval_unet(self, model_num,epoch = 0):
+        print(f"Doing evaluation on {len(self.original_filenames)} spectrograms and {len(self.original_labels)} labels.")
+        test_model = AudioUNet()
+        test_model.model_num = model_num
+        
+        test_model.load_params(
+            self.MODEL_DIR,
+            model_num
+        )
+        test_model.to(self.device)
+
+        loss_func = HashingDenoisingLoss()
+
+        # ==========================================
+        # EVALUATION PHASE
+        # ==========================================
+        # 1. Switch to evaluation mode (freezes Dropout/BatchNorm)
+        test_model.eval()
+        val_running_loss = 0.0
+        
+        # 2. Disable gradient engine to save GPU memory and speed up compute
+        with torch.no_grad():
+            val_loop = tqdm(self.test_dataloader, desc=f"Eval Epoch  {epoch+1}")
+            
+            for noisy_spec, clean_spec, _ in val_loop:
+                noisy_spec = noisy_spec.to(self.device)
+                clean_spec = clean_spec.to(self.device)
+                
+                # Forward pass ONLY
+                denoised_spec, mask = test_model(noisy_spec)
+                val_loss = loss_func(denoised_spec, clean_spec)
+                
+                val_running_loss += val_loss.item()
+                val_loop.set_postfix(Val_Loss=f"{val_loss.item():.4f}")
+        
+        # Calculate average epoch validation loss
+        epoch_val_loss = val_running_loss / len(self.test_dataloader)
+        return f"--- Eval Epoch {epoch+1} Completed | Average Val Loss: {epoch_val_loss:.4f} ---"
+        # ==========================================
+    
     def eval_model(self, model_num):
         print(f"Doing evaluation on {len(self.original_filenames)} spectrograms and {len(self.original_labels)} labels.")
-        train_model = AudioResNet(embedding_size=128).to(self.device)
+        train_model = AudioUNet().to(self.device)
         train_model.model_num = model_num
-
-        if model_num>0:
-            train_model.load_params(
-                self.MODEL_DIR,
-                model_num
-            )
+        
+        train_model.load_params(
+            self.MODEL_DIR,
+            model_num
+        )
         
         # Initialize the evaluator 
-        evaluator = Evaluator()
+        evaluator = EvaluatorUNetMath()
         evaluator.evaluate(
             model = train_model,
             noisy_dataloader = self.test_dataloader,
@@ -170,4 +223,3 @@ class TrainingPipeline:
 
     def quantize_onnx(self) -> None:
         raise NotImplementedError("TrainingPipeline not yet implemented")
-

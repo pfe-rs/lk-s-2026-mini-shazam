@@ -34,14 +34,14 @@ class TripletDataset(Dataset):
                 db_mel_spec = self.audioAugmenter.add_background_speech(
                     db_mel_spec,
                     random.choice(self.noise_paths),
-                    random.randint(0, 5)  # attenuation in dB
+                    random.randint(-10, 5)  # attenuation in dB
                 )
         elif self.type_of_dataset == "test":
             # Test gets noise every time to simulate real-world Shazam usage
             db_mel_spec = self.audioAugmenter.add_background_speech(
                     db_mel_spec,
                     random.choice(self.noise_paths),
-                    random.randint(0, 5)  
+                    random.randint(-10, 5)  
                 )
         elif self.type_of_dataset == "original":
             pass
@@ -49,7 +49,76 @@ class TripletDataset(Dataset):
             print("Error: Unknown dataset type, returning original spectrogram.")
             
         return db_mel_spec, label
-    
+
+class UNetDataset(Dataset):
+    def __init__(self, data_paths, train_labels, noise_paths, type_of_dataset):
+        """
+        Args:
+            data_paths (list): Paths to the clean, original spectrogram numpy arrays.
+            noise_paths (list): Paths to the noise audio/spectrograms.
+        """
+        self.data_paths = data_paths
+        self.train_labels = train_labels
+        self.noise_paths = noise_paths
+        self.audioAugmenter = AudioAugmenter()
+        self.type_of_dataset = type_of_dataset
+
+    def __len__(self):
+        return len(self.data_paths)
+
+    def __getitem__(self, index):
+        # 1. Load the CLEAN ground-truth spectrogram
+        file_path = self.data_paths[index]
+        clean_spec = torch.from_numpy(np.load(file_path)).float()
+
+        label = self.train_labels[index]
+
+        # Add explicit channel dimension [Height, Width] -> [1, Height, Width]
+        if clean_spec.ndim == 2:
+            clean_spec = clean_spec.unsqueeze(0)
+
+        # 2. Generate the NOISY input
+        # We clone the clean tensor to ensure the original target is not mutated
+        noisy_spec = clean_spec.clone()
+
+        
+
+        # Apply the noise augmentation. 
+        if self.type_of_dataset == "train":
+            # 90% chance of adding background noise
+            if random.random() < 0.9:
+                # FIX: Assign the result back to noisy_spec, NOT db_mel_spec!
+                noisy_spec = self.audioAugmenter.add_background_speech(
+                    noisy_spec,
+                    random.choice(self.noise_paths),
+                    random.randint(-10, 5)  # attenuation in dB
+                )
+        elif self.type_of_dataset == "test":
+            # Test gets noise every time to simulate real-world Shazam usage
+            # FIX: Assign the result back to noisy_spec
+            noisy_spec = self.audioAugmenter.add_background_speech(
+                    noisy_spec,
+                    random.choice(self.noise_paths),
+                    random.randint(-10, 5)  
+                )
+        elif self.type_of_dataset == "original":
+            pass
+        else:
+            print("Error: Unknown dataset type, returning original spectrogram.")
+
+        # 3. CRITICAL FIX: Min-Max Normalization to [0.0, 1.0]
+        # We find the absolute min and max across BOTH tensors to ensure 
+        # the relative volume difference between clean and noisy is preserved.
+        min_val = min(clean_spec.min().item(), noisy_spec.min().item())
+        max_val = max(clean_spec.max().item(), noisy_spec.max().item())
+        
+        # Prevent division by zero just in case the audio is pure dead silence
+        if (max_val - min_val) > 1e-6:
+            noisy_spec = (noisy_spec - min_val) / (max_val - min_val)
+            clean_spec = (clean_spec - min_val) / (max_val - min_val)
+            
+        # Return the input (noisy), the target label (clean), and the class label
+        return noisy_spec, clean_spec, label
 class PathMaker:
     def __init__(self):
         pass
@@ -115,3 +184,4 @@ class PathMaker:
     def make_paths_from_folder(self, dir):
         noise_names =os.listdir(dir)
         return [os.path.join(dir, noise_name) for noise_name in noise_names]
+
